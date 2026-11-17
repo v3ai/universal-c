@@ -46,6 +46,11 @@
 | Empty macro arguments `F(,)` | Explicit arguments |
 | Mixed-type `?:` tricks relying on `_Generic` | Separate functions per type |
 | An empty translation unit | Every `.c` file must contain at least one declaration |
+| `??` followed by `= ( / ) ' < ! > -` anywhere (trigraphs) | C89–C17 replace these; C23 removed trigraphs, so `"what??!"` prints `what\|` or `what??!` depending on `-std`. Write `"?" "?!"` or `\?\?` |
+| Digraphs `<: :> <% %> %: %:%:` | The real tokens (digraphs are C95) |
+| Hex float constants `0x1p3`, universal character names `é` | Decimal constants; UTF-8 bytes written as `\xNN` escapes |
+| `[static N]` / qualifiers inside array parameter brackets | Plain pointer parameter |
+| Anonymous struct/union members | Named members |
 
 Non-initializer expressions in aggregate initializers of automatic variables
 (`int a[2] = { x, y };` where `x` is a variable) are C99-only. Initializers of arrays,
@@ -79,20 +84,32 @@ structs and unions MUST be constant expressions; assign runtime values afterward
 - C23 changed meaning: `auto` (do not use `auto` at all)
 - C++ keywords (always avoid, cheap insurance): `class new delete this template typename
   namespace using operator private protected public virtual friend explicit mutable
-  try catch throw export concept requires`
+  try catch throw export concept requires asm wchar_t char8_t char16_t char32_t
+  noexcept decltype constinit consteval co_await co_return co_yield typeid
+  static_cast dynamic_cast const_cast reinterpret_cast`
+- C++ alternative tokens, which are also macros in C's `<iso646.h>` (C95): `and or not xor
+  bitand bitor compl and_eq or_eq xor_eq not_eq`
+- `asm` and `fortran` are listed in C89's informative "common extensions" as keywords.
 
 **MUST NOT** define identifiers that are reserved by the standard:
 
 - Anything beginning with `_` followed by an uppercase letter or another `_`.
-- Anything containing `__`.
 - File-scope names beginning with `_`.
 - Names beginning with `str`, `mem`, `wcs` + lowercase letter; `is`/`to` + lowercase letter;
   `E` + digit or uppercase letter (errno macros); `SIG`/`SIG_` + uppercase; `LC_` + uppercase.
-- Any name already in the standard library (`index`, `abs`, `time`, `remove`, `free`, …).
+- Any `<math.h>` function name with an `f` or `l` suffix (`sinf`, `sqrtl`): reserved since C89.
+- Names reserved by later headers, even if you don't include them: `int`/`uint` + anything
+  + `_t`; `INT`/`UINT` + anything + `_MAX`/`_MIN`/`_C`; `PRI`/`SCN` + lowercase letter or `X`;
+  `atomic_`, `memory_order_`, `cnd_`, `mtx_`, `thrd_`, `tss_`, `FE_`, `FP_`, `TIME_` prefixes.
+- Any name already in the C standard library (`abs`, `time`, `remove`, `free`, …), and the
+  common POSIX names `index`, `rindex`, `bzero`, `strdup` (not ISO C, but they clash in practice).
+- Not reserved in C, but reserved in C++ and best avoided: any identifier containing `__`.
 
 **MUST** prefix all public names in a project with a short project prefix (`p_` in this
-document; the user may choose another). Keep identifiers unique within the first 31
-characters.
+document; the user may choose another). Keep every identifier unique within its first 31
+characters (the C99 minimum, met by every current toolchain). C89 strictly guarantees only
+**6 significant, case-insensitive characters for external names**; if the user targets a
+pre-C99 linker, make external names unique in their first 6 characters ignoring case.
 
 ---
 
@@ -191,6 +208,13 @@ typedef unsigned __int64 p_u64;
 typedef __int64          p_s64;
 #  define P_U64_C(c) c##ui64
 #  define P_HAS_64 1
+#elif defined(__GNUC__)
+/* GCC/Clang in C89 mode on ILP32 or LLP64 (32-bit Linux, MinGW): long long exists
+   as an extension; __extension__ keeps -pedantic-errors quiet. */
+__extension__ typedef unsigned long long p_u64;
+__extension__ typedef long long          p_s64;
+#  define P_U64_C(c) (__extension__ c##ULL)
+#  define P_HAS_64 1
 #else
 #  define P_HAS_64 0
 #endif
@@ -223,23 +247,42 @@ P_STATIC_ASSERT((-1 & 3) == 3, twos_complement);
 ```
 
 Notes:
+- Use `P_INLINE` **only** as `static P_INLINE`. Plain `inline` means different things in
+  GNU89 and C99: a non-`static` inline function in a header causes "multiple definition"
+  link errors under C89 and "undefined reference" errors under C99.
+- Each `P_STATIC_ASSERT` tag MUST be unique across everything a translation unit includes.
+  Repeating a typedef is an error in C89/C99 (allowed only from C11).
 - In C89 there may be no 64-bit type at all. Code that needs 64-bit arithmetic MUST either
   `#if P_HAS_64` with a fallback, or `#error` clearly.
 - Print `p_u32` as `printf("%lu", (unsigned long)x)`. Print `p_u64` with the
   `p_u64_to_dec` helper in §5 (C89 `printf` has no 64-bit specifier).
-- Print `size_t` as `printf("%lu", (unsigned long)n)`. **MUST NOT** use `%zu`, `%lld`,
-  `%llu`, `%hhd`, `%jd`, `%td`, `%a`, or `<inttypes.h>` `PRI*` macros.
+- Print `size_t` as `printf("%lu", (unsigned long)n)`, but only when `n` is known to be
+  ≤ `ULONG_MAX`. On 64-bit Windows `unsigned long` is 32-bit and the cast truncates.
+  Otherwise convert to `p_u64` and use `p_u64_to_dec`. **MUST NOT** use `%zu`, `%lld`,
+  `%llu`, `%hhd`, `%jd`, `%td`, `%a`, `%lf`/`%lF` in `printf` (undefined in C89; `%f`
+  already takes a `double`), or `<inttypes.h>` `PRI*` macros.
 
 ---
 
 ## 5. Standard library: C89 functions only
 
-**MUST NOT** use these C99+ functions, macros and headers:
-`snprintf vsnprintf va_copy strtoll strtoull strtof strtold llabs lldiv atoll isblank _Exit`;
-C99 math (`round trunc fmin fmax fma hypot log2 exp2 cbrt expm1 log1p lround nan`,
-float/long-double variants like `sinf sqrtl`, `isnan isinf isfinite fpclassify signbit
-NAN INFINITY`);
-headers `<stdint.h> <inttypes.h> <stdbool.h> <complex.h> <fenv.h> <tgmath.h>
+The rule is an **allow-list**: use only the 15 headers of C89 (`<assert.h> <ctype.h>
+<errno.h> <float.h> <limits.h> <locale.h> <math.h> <setjmp.h> <signal.h> <stdarg.h>
+<stddef.h> <stdio.h> <stdlib.h> <string.h> <time.h>`) and only the functions and macros C89
+declares in them. Newer libraries declare later additions in those same headers, and
+`-std=c89` does not always hide them, so the lists below are examples, not the full set.
+
+**MUST NOT** use these C95/C99/C11/C23 functions, macros and headers, among others:
+`snprintf vsnprintf vscanf vfscanf vsscanf va_copy strtoll strtoull strtof strtold
+strtoimax llabs lldiv atoll isblank _Exit`;
+C99 math (`round trunc fmin fmax fma hypot log2 exp2 cbrt expm1 log1p lround nan copysign
+nearbyint remainder scalbn erf tgamma lgamma`, float/long-double variants like `sinf sqrtl`,
+`isnan isinf isfinite fpclassify signbit isgreater NAN INFINITY HUGE_VALF`);
+C11 `aligned_alloc quick_exit at_quick_exit timespec_get` and the optional Annex K `*_s`
+functions (`fopen_s strcpy_s memcpy_s sprintf_s`, which MSVC suggests);
+C23 `strdup strndup memccpy memset_explicit memalignment free_sized ckd_add`;
+headers `<iso646.h> <wchar.h> <wctype.h>` (C95; `-std=c89` does **not** reject these)
+`<stdint.h> <inttypes.h> <stdbool.h> <complex.h> <fenv.h> <tgmath.h>
 <stdalign.h> <stdatomic.h> <stdnoreturn.h> <threads.h> <uchar.h> <stdbit.h> <stdckdint.h>`
 (the only exception is the guarded `<stdint.h>` inside `port.h`).
 
@@ -271,7 +314,7 @@ char  *p_u64_to_dec(char *buf, p_u64 v);
 #endif
 
 /* Safe worst-case buffer size for sprintf("%d") of an int. Use sprintf ONLY
-   when the buffer size is provably sufficient; otherwise use p_strlcpy. */
+   when the buffer size is provably sufficient. Copy strings with p_strlcpy. */
 #define P_INT_DEC_BUF (sizeof(int) * CHAR_BIT / 3 + 3)
 
 P_END_DECLS
@@ -281,6 +324,7 @@ P_END_DECLS
 
 ```c
 /* file: p_util.c  (universal C helpers: implementation) */
+#include <stdlib.h>
 #include <string.h>
 #include "p_util.h"
 
@@ -293,15 +337,17 @@ p_bool p_add_int(int a, int b, int *out)
     return P_TRUE;
 }
 
-/* Overflow-checked int multiplication. */
+/* Overflow-checked int multiplication. Quotients with a negative result use div(),
+   which truncates toward zero in every standard; plain `/` may round toward -inf
+   in C89, which would let some overflowing products through. */
 p_bool p_mul_int(int a, int b, int *out)
 {
     if (a > 0) {
         if (b > 0) { if (a > INT_MAX / b) return P_FALSE; }
-        else       { if (b < INT_MIN / a) return P_FALSE; }
+        else       { if (b < div(INT_MIN, a).quot) return P_FALSE; }
     } else if (a < 0) {
-        if (b > 0) { if (a < INT_MIN / b) return P_FALSE; }
-        else       { if (b != 0 && a < INT_MAX / b) return P_FALSE; }
+        if (b > 0) { if (a < div(INT_MIN, b).quot) return P_FALSE; }
+        else       { if (b != 0 && a < div(INT_MAX, b).quot) return P_FALSE; }
     }
     *out = a * b;
     return P_TRUE;
@@ -423,6 +469,10 @@ will silently delete checks that rely on it.
 - Shifting by a negative amount or by ≥ the operand's width.
 - Left-shifting a negative value, or shifting a 1 into/past the sign bit of a signed type.
   Do all bit manipulation on **unsigned** types.
+- **Integer promotion traps.** `unsigned char`, `unsigned short`, `p_u8` and `p_u16`
+  promote to **signed** `int` before arithmetic. `p_u16 a = 65535; a * a` overflows `int`
+  (UB), and `(p_u8)200 << 24` shifts into the sign bit (UB). Cast to `p_u32` (or `unsigned`
+  for 16-bit results) **before** multiplying or shifting: `(p_u32)a * a`.
 - Division or modulo by zero.
 - Converting a floating value to an integer type that cannot represent it (including
   negative → unsigned).
@@ -493,6 +543,13 @@ models.
   consensus), use integer or fixed-point arithmetic.
 - Check for NaN with `x != x` (only valid without `-ffast-math`). There is no `isnan` in C89.
 - Never convert out-of-range floats to integers (UB). Clamp first.
+- `printf` float output is **not** portable text. The Microsoft C runtime prints
+  `%e`/`%g` with three exponent digits (`1.234568e+004` against `e+04` elsewhere), and NaN or
+  infinity as `-1.#IND`/`1.#INF` against `nan`/`-nan`/`inf`. With MinGW the result even
+  changes between `-std=c89` and `-std=c99`. When output must match, never `printf` a NaN or
+  infinity; print with `%f` or `%.Nf`, or format fixed-point integers yourself.
+- GCC contracts `a*b+c` into an FMA by default in `gnu*` modes but not in ISO `-std=c*`
+  modes, so the same source can round differently depending on `-std`.
 
 ---
 
@@ -500,14 +557,22 @@ models.
 
 Stay within these so tiny or legacy compilers accept the code:
 
-- Logical source line and string literal: ≤ 509 characters (split long literals:
-  `"abc" "def"`).
-- ≤ 31 function parameters / call arguments; ≤ 31 macro parameters.
-- ≤ 127 members per struct/union; ≤ 127 enumerators per enum.
+- Logical source line: ≤ 509 characters.
+- String literal: ≤ 509 characters **after** adjacent literals are concatenated. Splitting
+  `"abc" "def"` does not help (`-std=c89 -pedantic-errors` rejects it). Store longer text
+  as an array of shorter strings, or as a `char` array initialized element by element.
+- ≤ 31 function parameters / call arguments; ≤ 31 macro parameters / macro arguments.
+- ≤ 127 members per struct/union; ≤ 127 enumerators per enum; ≤ 15 levels of nested
+  struct/union definitions.
 - ≤ 15 nested blocks; ≤ 8 nested `#include`s; ≤ 8 nested `#if`s.
+- ≤ 32 nested parenthesized expressions; ≤ 31 nested parenthesized declarators;
+  ≤ 12 pointer/array/function modifiers on one declarator.
 - ≤ 257 `case` labels per `switch`.
+- ≤ 511 external identifiers per translation unit; ≤ 127 identifiers declared in one
+  block; ≤ 1024 macros defined at once.
 - Single object ≤ 32767 bytes for guaranteed portability (larger objects: `malloc`).
-- Identifiers unique within 31 characters.
+- Identifiers unique within 31 characters; external names within 6 characters,
+  case-insensitive, if a pre-C99 linker is a target (see §3).
 
 ---
 
@@ -545,6 +610,10 @@ on some compilers. Fix the code.
 ## 12. Checklist before outputting code
 
 - [ ] Only `/* */` comments; all declarations at block tops; no `for (int ...)`.
+- [ ] No `??` trigraph sequences or digraphs; no string literal over 509 characters after
+      concatenation.
+- [ ] `P_INLINE` only ever appears as `static P_INLINE`.
+- [ ] `p_u8`/`p_u16`/`unsigned char`/`unsigned short` cast to `p_u32` before `*` or `<<`.
 - [ ] No C99+ syntax: designated initializers, compound literals, VLAs, flexible arrays,
       variadic macros, `long long`, `bool`, bare `inline`/`restrict`, trailing enum comma.
 - [ ] Every function has a return type and a prior prototype; empty lists are `(void)`.
@@ -591,7 +660,13 @@ s390x-linux-gnu-gcc -std=c89 -O2 -static *.c -o t && qemu-s390x ./t  # big-endia
 
 # 4. Static analysis
 gcc -fanalyzer -c *.c ; cppcheck --std=c89 --enable=all .
+
+# 5. Things -std=c89 does not reject: C95 headers and trigraphs
+grep -nE '#[[:space:]]*include[[:space:]]*<(iso646|wchar|wctype)\.h>|\?\?[=(/)'"'"'<!>-]' *.c *.h \
+  && echo "non-universal construct found" && exit 1
 ```
 
-Same inputs MUST produce byte-identical outputs on every configuration. For high-assurance
+Same inputs MUST produce identical outputs on every configuration. For text streams that
+means identical after line-ending normalization: Windows text mode writes `\n` as `\r\n`.
+Where bytes must match exactly, open the file with `"wb"` and write `\n` yourself. For high-assurance
 code, also consult SEI CERT C and MISRA C, and consider Frama-C for proofs of UB absence.
